@@ -432,7 +432,11 @@ async function viewRecipeForm(id) {
       aiButton.disabled = true;
       aiStatus.textContent = 'AIが整形しています…';
       try {
-        const result = await structureRecipe(transcript);
+        const result = await structureRecipe(transcript, {
+          onRetry: (attempt, max) => {
+            aiStatus.textContent = `混雑のため再試行しています…（${attempt}/${max}）`;
+          },
+        });
         if (result.title) { draft.title = result.title; titleInput.value = draft.title; }
         if (result.servings) { draft.servings = result.servings; servingsInput.value = draft.servings; }
         if (result.ingredients.length) { draft.ingredients = result.ingredients; ingredients.refresh(); }
@@ -730,7 +734,11 @@ function viewImport() {
       try {
         const images = await Promise.all(files.map(readImageAsBase64));
         status.textContent = 'AIが変換しています…';
-        const results = await structureRecipes(text, images);
+        const results = await structureRecipes(text, images, {
+          onRetry: (attempt, max) => {
+            status.textContent = `混雑のため再試行しています…（${attempt}/${max}）`;
+          },
+        });
         if (!results.length) {
           status.textContent = 'レシピを読み取れませんでした。文章を見直してもう一度試してください。';
           candidates = [];

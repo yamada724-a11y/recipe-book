@@ -35,34 +35,50 @@ function buildPrompt(schema, transcript) {
   ].filter(Boolean).join('\n');
 }
 
-async function callGemini(parts) {
+// 503（混雑）・429（レート制限）は一時的なことが多いため、少し待って自動再試行する。
+const RETRYABLE_STATUS = new Set([503, 429]);
+const MAX_RETRIES = 2;
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callGemini(parts, { onRetry } = {}) {
   const apiKey = getSetting(KEYS.geminiApiKey);
   if (!apiKey) throw new MissingKeyError();
 
   const url = new URL(GEMINI_ENDPOINT);
   url.searchParams.set('key', apiKey);
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts }],
-      generationConfig: { responseMimeType: 'application/json' },
-    }),
-  });
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts }],
+        generationConfig: { responseMimeType: 'application/json' },
+      }),
+    });
 
-  if (!res.ok) {
+    if (res.ok) {
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Error('AIの応答を読み取れませんでした。もう一度試してください。');
+      }
+    }
+
     const detail = await res.json().catch(() => null);
     const reason = detail?.error?.message || '';
-    throw new Error(`Gemini APIがエラーを返しました（${res.status}）${reason ? `：${reason}` : ''}`);
-  }
-
-  const data = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error('AIの応答を読み取れませんでした。もう一度試してください。');
+    const canRetry = RETRYABLE_STATUS.has(res.status) && attempt < MAX_RETRIES;
+    if (!canRetry) {
+      throw new Error(`Gemini APIがエラーを返しました（${res.status}）${reason ? `：${reason}` : ''}`);
+    }
+    const delayMs = 1500 * (attempt + 1);
+    onRetry?.(attempt + 1, MAX_RETRIES);
+    await wait(delayMs);
   }
 }
 
@@ -85,8 +101,8 @@ function cleanRecipe(raw) {
   };
 }
 
-export async function structureRecipe(transcript) {
-  const raw = await callGemini([{ text: buildPrompt(SINGLE_SCHEMA, transcript) }]);
+export async function structureRecipe(transcript, { onRetry } = {}) {
+  const raw = await callGemini([{ text: buildPrompt(SINGLE_SCHEMA, transcript) }], { onRetry });
   return cleanRecipe(raw);
 }
 
@@ -105,12 +121,12 @@ function buildBulkPrompt(text, hasImages) {
 }
 
 /* text: 貼り付けたテキスト（空文字可）。images: [{ mimeType, data(base64) }]（省略可）。 */
-export async function structureRecipes(text, images = []) {
+export async function structureRecipes(text, images = [], { onRetry } = {}) {
   const parts = [{ text: buildBulkPrompt(text, images.length > 0) }];
   for (const image of images) {
     parts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
   }
-  const raw = await callGemini(parts);
+  const raw = await callGemini(parts, { onRetry });
   const list = Array.isArray(raw?.recipes) ? raw.recipes : [];
   return list.map(cleanRecipe).filter((recipe) => recipe.title || recipe.ingredients.length);
 }
