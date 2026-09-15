@@ -70,6 +70,7 @@ function go(path) {
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 let activeRecognition = null;
+let allowRecognitionRestart = false;
 
 const SPEECH_ERRORS = {
   'not-allowed': 'マイクの使用が許可されていません。ブラウザの設定を確認してください。',
@@ -77,6 +78,13 @@ const SPEECH_ERRORS = {
   'no-speech': '音声が聞き取れませんでした。',
   network: '通信できませんでした。',
 };
+
+const FATAL_SPEECH_ERRORS = new Set(['not-allowed', 'service-not-allowed', 'audio-capture']);
+
+function stopRecognition() {
+  allowRecognitionRestart = false;
+  activeRecognition?.abort();
+}
 
 /* ---------- Theme ---------- */
 
@@ -307,38 +315,83 @@ async function viewRecipeForm(id) {
     );
   }
 
+  // Androidでは同じ確定結果がevent.resultIndexをまたいで再送されることがあり、
+  // 単純に加算していくと同じ単語が何度も重複してしまう。直前の確定文言と
+  // 発生時刻を覚えておき、極端に短い間隔で同一文言が来た場合は重複として無視する。
+  let lastFinalChunk = '';
+  let lastFinalAt = 0;
+
   function listen() {
     const recognition = new SpeechRecognition();
     recognition.lang = 'ja-JP';
     recognition.interimResults = true;
-    recognition.continuous = true;
+    // Android版Chromeはcontinuous:trueにすると数秒の無音で認識が打ち切られ、
+    // 続きが復元されないまま話した内容の大半が失われる不具合があるため、
+    // 1発話ごとに区切ってonendで再開する方式にする。
+    recognition.continuous = false;
 
     const base = transcriptArea.value;
     const separator = base && !/\s$/.test(base) ? '\n' : '';
+    // Android版ChromeはresultIndexが信頼できず、確定結果を何度も再送してくることがあるため、
+    // 差分を加算するのではなく「直近の1件」だけを毎回の発話結果として扱う。
+    let finalized = '';
+
+    function applyText(interim) {
+      transcriptArea.value = base + separator + finalized + interim;
+      transcriptArea.scrollTop = transcriptArea.scrollHeight;
+    }
 
     recognition.onstart = () => {
       activeRecognition = recognition;
+      allowRecognitionRestart = true;
       setMicState(true);
       aiStatus.textContent = '';
     };
     recognition.onresult = (event) => {
-      const spoken = [...event.results].map((result) => result[0].transcript).join('');
-      transcriptArea.value = base + separator + spoken;
-      transcriptArea.scrollTop = transcriptArea.scrollHeight;
+      const last = event.results[event.results.length - 1];
+      const text = last[0].transcript;
+      if (last.isFinal) {
+        const now = Date.now();
+        const isEcho = text === lastFinalChunk && now - lastFinalAt < 1500;
+        if (!isEcho) {
+          finalized = text;
+          lastFinalChunk = text;
+          lastFinalAt = now;
+        }
+        applyText('');
+      } else {
+        applyText(text);
+      }
     };
     recognition.onerror = (event) => {
-      aiStatus.textContent = SPEECH_ERRORS[event.error] || '音声入力に失敗しました。';
+      if (FATAL_SPEECH_ERRORS.has(event.error)) allowRecognitionRestart = false;
+      if (event.error !== 'no-speech' && event.error !== 'aborted') {
+        aiStatus.textContent = SPEECH_ERRORS[event.error] || '音声入力に失敗しました。';
+      }
     };
     recognition.onend = () => {
       activeRecognition = null;
-      setMicState(false);
+      if (allowRecognitionRestart) {
+        // 直後に再開すると、直前の発話の余韻(残響)を同じ言葉として再度拾ってしまう
+        // ことがあるため、わずかに間を空けてから次の認識を開始する。
+        setTimeout(() => { if (allowRecognitionRestart) listen(); }, 300);
+      } else {
+        setMicState(false);
+      }
     };
     recognition.start();
   }
 
   const micButton = SpeechRecognition && h('button', {
     class: 'tonal',
-    onClick: () => (activeRecognition ? activeRecognition.stop() : listen()),
+    onClick: () => {
+      if (activeRecognition) {
+        allowRecognitionRestart = false;
+        activeRecognition.stop();
+      } else {
+        listen();
+      }
+    },
   }, [icon('mic', 20), h('span', { text: '音声で入力' })]);
 
   const titleInput = h('input', {
@@ -857,7 +910,7 @@ function viewLogin() {
 /* ---------- Router ---------- */
 
 async function render() {
-  activeRecognition?.abort();
+  stopRecognition();
 
   if (!currentUser()) {
     app.replaceChildren(viewLogin());
