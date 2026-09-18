@@ -106,6 +106,39 @@ export async function structureRecipe(transcript, { onRetry } = {}) {
   return cleanRecipe(raw);
 }
 
+const IMAGE_PROMPT = [
+  'あなたは料理レシピの構造化アシスタントです。',
+  'レシピを書いたメモ（主に手書き）を撮影した写真を渡します。複数枚ある場合は同じレシピの続きです。',
+  '写真に書かれている文字を読み取り、次のJSON形式のみを出力してください（説明文やコードブロック記号は不要です）。',
+  SINGLE_SCHEMA,
+  '分量や数字は書かれているとおりに写してください。読み取れない文字を推測で補ったり、書かれていない材料・手順を加えたりしないでください。書かれていない項目は空文字/空配列にしてください。',
+].join('\n');
+
+/* images: [{ mimeType, data(base64) }] */
+export async function structureRecipeFromImages(images, { onRetry } = {}) {
+  const parts = [{ text: IMAGE_PROMPT }];
+  for (const image of images) {
+    parts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
+  }
+  return cleanRecipe(await callGemini(parts, { onRetry }));
+}
+
+const TRANSCRIBE_PROMPT = [
+  '以下は、料理のレシピ（材料・分量・手順など）を日本語で話した録音です。',
+  '話された内容を正確に文字起こしし、次のJSON形式のみを出力してください（説明文やコードブロック記号は不要です）。',
+  '{"text":"文字起こしした文章"}',
+  '「えー」「あの」などの言い淀みは省き、数字や分量（大さじ・小さじ・グラムなど）は算用数字で書いてください。話されていない内容は加えず、何も聞き取れない場合は空文字にしてください。',
+].join('\n');
+
+/* audio: { mimeType, data(base64) } */
+export async function transcribeAudio(audio, { onRetry } = {}) {
+  const raw = await callGemini(
+    [{ text: TRANSCRIBE_PROMPT }, { inlineData: { mimeType: audio.mimeType, data: audio.data } }],
+    { onRetry }
+  );
+  return (typeof raw?.text === 'string' ? raw.text : '').trim();
+}
+
 function buildBulkPrompt(text, hasImages) {
   return [
     'あなたは料理レシピの構造化アシスタントです。',

@@ -1,5 +1,5 @@
 /* アプリを更新したら、この番号を1つ上げること。 */
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v6';
 
 const SHELL_CACHE = `shell-${CACHE_VERSION}`;
 
@@ -10,6 +10,7 @@ const SHELL = [
   './app.js',
   './firebase.js',
   './ai.js',
+  './audio.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
 ];

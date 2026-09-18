@@ -2,7 +2,10 @@ import {
   createRecipe, listRecipes, getRecipe, saveRecipe, deleteRecipe, onChange, normalizeSearchTerm,
   signIn, signOutUser, onAuthChange, currentUser, startSync, stopSync,
 } from './firebase.js';
-import { KEYS, getSetting, setSetting, structureRecipe, structureRecipes, MissingKeyError } from './ai.js';
+import {
+  KEYS, getSetting, setSetting, structureRecipe, structureRecipes, structureRecipeFromImages, transcribeAudio, MissingKeyError,
+} from './ai.js';
+import { toWav } from './audio.js';
 
 const app = document.getElementById('app');
 
@@ -37,6 +40,7 @@ const ICONS = {
   settings: 'M19.14,12.94c0.04,-0.3 0.06,-0.61 0.06,-0.94c0,-0.32 -0.02,-0.64 -0.07,-0.94l2.03,-1.58c0.18,-0.14 0.23,-0.41 0.12,-0.61l-1.92,-3.32c-0.12,-0.22 -0.37,-0.29 -0.59,-0.22l-2.39,0.96c-0.5,-0.38 -1.03,-0.7 -1.62,-0.94L14.4,2.81c-0.04,-0.24 -0.24,-0.41 -0.48,-0.41h-3.84c-0.24,0 -0.43,0.17 -0.47,0.41L9.25,5.35C8.66,5.59 8.12,5.92 7.63,6.29L5.24,5.33c-0.22,-0.08 -0.47,0 -0.59,0.22L2.74,8.87C2.62,9.08 2.66,9.34 2.86,9.48l2.03,1.58C4.84,11.36 4.8,11.69 4.8,12s0.02,0.64 0.07,0.94l-2.03,1.58c-0.18,0.14 -0.23,0.41 -0.12,0.61l1.92,3.32c0.12,0.22 0.37,0.29 0.59,0.22l2.39,-0.96c0.5,0.38 1.03,0.7 1.62,0.94l0.36,2.54c0.05,0.24 0.24,0.41 0.48,0.41h3.84c0.24,0 0.44,-0.17 0.47,-0.41l0.36,-2.54c0.59,-0.24 1.13,-0.56 1.62,-0.94l2.39,0.96c0.22,0.08 0.47,0 0.59,-0.22l1.92,-3.32c0.12,-0.22 0.07,-0.47 -0.12,-0.61L19.14,12.94zM12,15.6c-1.98,0 -3.6,-1.62 -3.6,-3.6s1.62,-3.6 3.6,-3.6s3.6,1.62 3.6,3.6S13.98,15.6 12,15.6z',
   mic: 'M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z',
   stop: 'M6 6h12v12H6z',
+  camera: 'M12 15.2A3.2 3.2 0 1 0 12 8.8a3.2 3.2 0 0 0 0 6.4zM9 2 7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z',
   close: 'M19,6.41L17.59,5 12,10.59 6.41,5 5,6.41 10.59,12 5,17.59 6.41,19 12,13.41 17.59,19 19,17.59 13.41,12z',
   upload: 'M9,16h6v-6h4l-7,-7 -7,7h4zM5,18h14v2H5z',
   sparkle: 'M19,9l1.25,-2.75L23,5l-2.75,-1.25L19,1l-1.25,2.75L15,5l2.75,1.25L19,9zM11.5,9.5L9,4L6.5,9.5L1,12l5.5,2.5L9,20l2.5,-5.5L17,12L11.5,9.5zM19,15l-1.25,2.75L15,19l2.75,1.25L19,23l1.25,-2.75L23,19l-2.75,-1.25L19,15z',
@@ -66,24 +70,58 @@ function go(path) {
   location.hash = path;
 }
 
-/* ---------- Speech ---------- */
+/* ---------- Recording ---------- */
 
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let activeRecognition = null;
-let allowRecognitionRestart = false;
+// 端末の音声認識（Web Speech API）はAndroidで区切りごとに認識が止まり、再開までの間の言葉が
+// 抜けて精度が極端に落ちるため、録音した音声をまとめてGeminiで文字起こしする方式にしている。
+const canRecord = !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+const RECORDING_TYPES = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus'];
+const MAX_RECORDING_MS = 5 * 60 * 1000;
+let activeRecording = null;
 
-const SPEECH_ERRORS = {
-  'not-allowed': 'マイクの使用が許可されていません。ブラウザの設定を確認してください。',
-  'service-not-allowed': 'この端末では音声入力が使えませんでした。',
-  'no-speech': '音声が聞き取れませんでした。',
-  network: '通信できませんでした。',
-};
+async function startRecording({ onTick, onDone }) {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const mimeType = RECORDING_TYPES.find((type) => MediaRecorder.isTypeSupported(type));
+  const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+  const chunks = [];
+  const startedAt = Date.now();
+  const recording = {
+    discard: false,
+    stop: () => { if (recorder.state !== 'inactive') recorder.stop(); },
+  };
+  const ticker = setInterval(() => onTick(Date.now() - startedAt), 500);
+  const limit = setTimeout(recording.stop, MAX_RECORDING_MS);
+  recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    clearInterval(ticker);
+    clearTimeout(limit);
+    stream.getTracks().forEach((track) => track.stop());
+    if (activeRecording === recording) activeRecording = null;
+    if (!recording.discard) onDone(new Blob(chunks, { type: recorder.mimeType || mimeType || 'audio/webm' }));
+  };
+  recorder.start(1000);
+  activeRecording = recording;
+}
 
-const FATAL_SPEECH_ERRORS = new Set(['not-allowed', 'service-not-allowed', 'audio-capture']);
+/* 画面を移動するときは録音を止め、文字起こしはせずに破棄する。 */
+function stopRecording() {
+  if (!activeRecording) return;
+  activeRecording.discard = true;
+  activeRecording.stop();
+}
 
-function stopRecognition() {
-  allowRecognitionRestart = false;
-  activeRecognition?.abort();
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = () => reject(new Error('録音を読み込めませんでした。'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function formatElapsed(ms) {
+  const sec = Math.floor(ms / 1000);
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
 }
 
 /* ---------- Theme ---------- */
@@ -116,6 +154,7 @@ function bar({ title = '', left, right, titleIcon }) {
 const SOURCE_LABEL = {
   manual: '手入力',
   voice: '音声入力',
+  photo: 'メモの写真',
   notion: 'Notion',
   twitter: 'Twitterのブックマーク',
 };
@@ -307,92 +346,132 @@ async function viewRecipeForm(id) {
   });
   const aiStatus = h('p', { class: 'field__note' });
 
-  function setMicState(live) {
-    micButton.classList.toggle('tonal--live', live);
-    micButton.replaceChildren(
-      icon(live ? 'stop' : 'mic', 20),
-      h('span', { text: live ? '聞いています…' : '音声で入力' })
-    );
-  }
-
-  // Androidでは同じ確定結果がevent.resultIndexをまたいで再送されることがあり、
-  // 単純に加算していくと同じ単語が何度も重複してしまう。直前の確定文言と
-  // 発生時刻を覚えておき、極端に短い間隔で同一文言が来た場合は重複として無視する。
-  let lastFinalChunk = '';
-  let lastFinalAt = 0;
-
-  function listen() {
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'ja-JP';
-    recognition.interimResults = true;
-    // Android版Chromeはcontinuous:trueにすると数秒の無音で認識が打ち切られ、
-    // 続きが復元されないまま話した内容の大半が失われる不具合があるため、
-    // 1発話ごとに区切ってonendで再開する方式にする。
-    recognition.continuous = false;
-
-    const base = transcriptArea.value;
-    const separator = base && !/\s$/.test(base) ? '\n' : '';
-    // Android版ChromeはresultIndexが信頼できず、確定結果を何度も再送してくることがあるため、
-    // 差分を加算するのではなく「直近の1件」だけを毎回の発話結果として扱う。
-    let finalized = '';
-
-    function applyText(interim) {
-      transcriptArea.value = base + separator + finalized + interim;
-      transcriptArea.scrollTop = transcriptArea.scrollHeight;
+  function showAiError(error) {
+    if (error instanceof MissingKeyError) {
+      aiStatus.replaceChildren(
+        'Gemini APIキーが未設定です。',
+        h('button', { class: 'link', text: '設定を開く', onClick: () => go('/settings') })
+      );
+    } else {
+      aiStatus.textContent = error.message;
     }
-
-    recognition.onstart = () => {
-      activeRecognition = recognition;
-      allowRecognitionRestart = true;
-      setMicState(true);
-      aiStatus.textContent = '';
-    };
-    recognition.onresult = (event) => {
-      const last = event.results[event.results.length - 1];
-      const text = last[0].transcript;
-      if (last.isFinal) {
-        const now = Date.now();
-        const isEcho = text === lastFinalChunk && now - lastFinalAt < 1500;
-        if (!isEcho) {
-          finalized = text;
-          lastFinalChunk = text;
-          lastFinalAt = now;
-        }
-        applyText('');
-      } else {
-        applyText(text);
-      }
-    };
-    recognition.onerror = (event) => {
-      if (FATAL_SPEECH_ERRORS.has(event.error)) allowRecognitionRestart = false;
-      if (event.error !== 'no-speech' && event.error !== 'aborted') {
-        aiStatus.textContent = SPEECH_ERRORS[event.error] || '音声入力に失敗しました。';
-      }
-    };
-    recognition.onend = () => {
-      activeRecognition = null;
-      if (allowRecognitionRestart) {
-        // 直後に再開すると、直前の発話の余韻(残響)を同じ言葉として再度拾ってしまう
-        // ことがあるため、わずかに間を空けてから次の認識を開始する。
-        setTimeout(() => { if (allowRecognitionRestart) listen(); }, 300);
-      } else {
-        setMicState(false);
-      }
-    };
-    recognition.start();
   }
 
-  const micButton = SpeechRecognition && h('button', {
+  const onRetry = (attempt, max) => {
+    aiStatus.textContent = `混雑のため再試行しています…（${attempt}/${max}）`;
+  };
+
+  function applyResult(result) {
+    if (result.title) { draft.title = result.title; titleInput.value = draft.title; }
+    if (result.servings) { draft.servings = result.servings; servingsInput.value = draft.servings; }
+    if (result.ingredients.length) { draft.ingredients = result.ingredients; ingredients.refresh(); }
+    if (result.steps.length) { draft.steps = result.steps; steps.refresh(); }
+  }
+
+  /* ---- 音声入力（録音してGeminiで文字起こし） ---- */
+
+  function setMicState(state, elapsedMs = 0) {
+    micButton.disabled = state === 'busy';
+    micButton.classList.toggle('tonal--live', state === 'recording');
+    const label = { recording: `録音中 ${formatElapsed(elapsedMs)}・タップで停止`, busy: '文字起こし中…' }[state] || '音声で入力';
+    micButton.replaceChildren(icon(state === 'recording' ? 'stop' : 'mic', 20), h('span', { text: label }));
+  }
+
+  async function transcribe(blob) {
+    if (blob.size < 1000) {
+      setMicState('idle');
+      aiStatus.textContent = '録音が短すぎました。もう一度お試しください。';
+      return;
+    }
+    setMicState('busy');
+    aiStatus.textContent = 'AIが文字起こししています…';
+    try {
+      let audio = blob;
+      try {
+        audio = await toWav(blob);
+      } catch (error) {
+        console.warn('WAVへの変換に失敗したため、録音をそのまま送ります', error);
+      }
+      const text = await transcribeAudio(
+        { mimeType: audio.type.split(';')[0] || 'audio/webm', data: await blobToBase64(audio) },
+        { onRetry }
+      );
+      if (!text) {
+        aiStatus.textContent = '音声を聞き取れませんでした。もう一度お試しください。';
+        return;
+      }
+      const current = transcriptArea.value.trimEnd();
+      transcriptArea.value = current ? `${current}\n${text}` : text;
+      aiStatus.textContent = '文字起こししました。内容を確認して「AIで整形する」を押してください。';
+    } catch (error) {
+      showAiError(error);
+    } finally {
+      setMicState('idle');
+    }
+  }
+
+  const micButton = canRecord && h('button', {
     class: 'tonal',
-    onClick: () => {
-      if (activeRecognition) {
-        allowRecognitionRestart = false;
-        activeRecognition.stop();
-      } else {
-        listen();
+    onClick: async () => {
+      if (activeRecording) {
+        activeRecording.stop();
+        return;
+      }
+      // マイクの許可を待っている間にもう一度押されると録音が二重に始まるため、開始処理中は押せなくする
+      micButton.disabled = true;
+      try {
+        await startRecording({ onTick: (ms) => setMicState('recording', ms), onDone: transcribe });
+        setMicState('recording');
+        aiStatus.textContent = '話し終わったら、もう一度ボタンを押してください（最長5分）。';
+      } catch (error) {
+        micButton.disabled = false;
+        aiStatus.textContent = error.name === 'NotAllowedError'
+          ? 'マイクの使用が許可されていません。ブラウザの設定を確認してください。'
+          : '録音を開始できませんでした。';
       }
     },
   }, [icon('mic', 20), h('span', { text: '音声で入力' })]);
+
+  /* ---- 写真（手書きメモなど）から読み取る ---- */
+
+  const memoImageInput = h('input', {
+    type: 'file',
+    accept: 'image/*',
+    multiple: true,
+    hidden: true,
+    onChange: async (e) => {
+      const files = [...e.target.files];
+      e.target.value = '';
+      if (!files.length) return;
+      photoReadButton.disabled = true;
+      aiStatus.textContent = '写真を読み込んでいます…';
+      try {
+        // 元の写真は数MBあり送信が重いため、手書き文字が潰れない程度に縮小してから送る。
+        const images = await Promise.all(files.map(async (file) => {
+          const dataUrl = await readAndCompressImage(file, 1600, 0.85);
+          return { mimeType: 'image/jpeg', data: dataUrl.split(',')[1] };
+        }));
+        aiStatus.textContent = 'AIが写真を読み取っています…';
+        const result = await structureRecipeFromImages(images, { onRetry });
+        if (!result.title && !result.ingredients.length && !result.steps.length) {
+          aiStatus.textContent = 'レシピを読み取れませんでした。文字全体が明るくはっきり写るように撮り直してみてください。';
+          return;
+        }
+        applyResult(result);
+        if (isNew) draft.sourceType = 'photo';
+        aiStatus.textContent = '読み取りました。内容を確認して保存してください。';
+      } catch (error) {
+        showAiError(error);
+      } finally {
+        photoReadButton.disabled = false;
+      }
+    },
+  });
+
+  const photoReadButton = h('button', {
+    class: 'tonal',
+    onClick: () => memoImageInput.click(),
+  }, [icon('camera', 20), h('span', { text: '写真から読み取る' })]);
 
   const titleInput = h('input', {
     type: 'text',
@@ -432,26 +511,11 @@ async function viewRecipeForm(id) {
       aiButton.disabled = true;
       aiStatus.textContent = 'AIが整形しています…';
       try {
-        const result = await structureRecipe(transcript, {
-          onRetry: (attempt, max) => {
-            aiStatus.textContent = `混雑のため再試行しています…（${attempt}/${max}）`;
-          },
-        });
-        if (result.title) { draft.title = result.title; titleInput.value = draft.title; }
-        if (result.servings) { draft.servings = result.servings; servingsInput.value = draft.servings; }
-        if (result.ingredients.length) { draft.ingredients = result.ingredients; ingredients.refresh(); }
-        if (result.steps.length) { draft.steps = result.steps; steps.refresh(); }
+        applyResult(await structureRecipe(transcript, { onRetry }));
         if (isNew) draft.sourceType = 'voice';
         aiStatus.textContent = '整形しました。内容を確認して保存してください。';
       } catch (error) {
-        if (error instanceof MissingKeyError) {
-          aiStatus.replaceChildren(
-            'Gemini APIキーが未設定です。',
-            h('button', { class: 'link', text: '設定を開く', onClick: () => go('/settings') })
-          );
-        } else {
-          aiStatus.textContent = error.message;
-        }
+        showAiError(error);
       } finally {
         aiButton.disabled = false;
       }
@@ -477,7 +541,8 @@ async function viewRecipeForm(id) {
       h('div', { class: 'card' }, [
         h('p', { class: 'card__label', text: '話す・書く（下書き）' }),
         transcriptArea,
-        h('div', { class: 'row-inline' }, [micButton, aiButton].filter(Boolean)),
+        h('div', { class: 'row-inline' }, [micButton, photoReadButton, aiButton].filter(Boolean)),
+        memoImageInput,
         aiStatus,
       ]),
       h('div', { class: 'card' }, [
@@ -869,10 +934,10 @@ function viewSettings() {
         h('p', { class: 'field__note', text: 'レシピの登録者・更新者として記録されます。' }),
       ]),
       h('div', { class: 'card' }, [
-        h('p', { class: 'card__label', text: 'Gemini API（音声入力のAI整形に使用）' }),
+        h('p', { class: 'card__label', text: 'Gemini API（音声の文字起こし・写真の読み取り・AI整形に使用）' }),
         apiKeyInput,
         h('p', { class: 'field__note' }, [
-          'この端末の中だけに保存され、レシピの整形リクエスト以外には送られません。無料枠のキーは ',
+          'この端末の中だけに保存され、レシピの読み取り・整形のリクエスト以外には送られません。無料枠のキーは ',
           h('a', { class: 'link', href: 'https://aistudio.google.com/apikey', target: '_blank', rel: 'noopener', text: 'Google AI Studio' }),
           ' から取得できます。　',
           reveal,
@@ -894,11 +959,49 @@ function viewMissing() {
   ];
 }
 
+/* QRコード読み取りアプリやLINEなどのアプリ内ブラウザでは、Googleがログインを受け付けない
+   （「リダイレクトが多すぎて失敗しました」等になる）ため、Chrome/Safariで開き直すよう案内する。 */
+function isInAppBrowser() {
+  return /; wv\)|\bLine\/|FBA[NV]|Instagram|YJApp|MicroMessenger/i.test(navigator.userAgent);
+}
+
+function inAppBrowserNotice() {
+  const appUrl = location.origin + location.pathname;
+  const ua = navigator.userAgent;
+  let openLink = null;
+  if (/\bLine\//i.test(ua)) {
+    openLink = h('a', { class: 'tonal', href: `${appUrl}?openExternalBrowser=1`, text: 'ブラウザで開く' });
+  } else if (/Android/i.test(ua)) {
+    const intentUrl = `intent://${location.host}${location.pathname}#Intent;scheme=https;package=com.android.chrome;end`;
+    openLink = h('a', { class: 'tonal', href: intentUrl, text: 'Chromeで開く' });
+  }
+  return h('div', { class: 'login__notice' }, [
+    h('p', { text: 'この画面ではログインできません。QRコード読み取りアプリやLINEなどの中の画面では、Googleのログインが使えないためです。Chrome（iPhoneはSafari）で開き直してください。' }),
+    h('p', { class: 'login__url', text: appUrl }),
+    h('div', { class: 'row-inline' }, [
+      openLink,
+      h('button', {
+        class: 'tonal',
+        text: 'URLをコピー',
+        onClick: async () => {
+          try {
+            await navigator.clipboard.writeText(appUrl);
+            toast('コピーしました。Chromeに貼り付けて開いてください');
+          } catch {
+            toast('コピーできませんでした。上のURLを長押ししてコピーしてください');
+          }
+        },
+      }),
+    ]),
+  ]);
+}
+
 function viewLogin() {
   return h('div', { class: 'login' }, [
     h('img', { class: 'login__icon', src: 'icons/icon-192.png', alt: '' }),
     h('h1', { class: 'login__title', text: 'レシピ帳' }),
     h('p', { class: 'login__text', text: '家族で使うレシピ帳です。Googleアカウントでログインしてください。' }),
+    isInAppBrowser() && inAppBrowserNotice(),
     h('button', {
       class: 'btn',
       text: 'Googleでログイン',
@@ -918,7 +1021,7 @@ function viewLogin() {
 /* ---------- Router ---------- */
 
 async function render() {
-  stopRecognition();
+  stopRecording();
 
   if (!currentUser()) {
     app.replaceChildren(viewLogin());
