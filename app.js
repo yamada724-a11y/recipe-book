@@ -6,6 +6,7 @@ import {
   KEYS, getSetting, setSetting, structureRecipe, structureRecipes, structureRecipeFromImages, transcribeAudio, MissingKeyError,
 } from './ai.js';
 import { toWav } from './audio.js';
+import { openCamera, closeCamera } from './camera.js';
 
 const app = document.getElementById('app');
 
@@ -41,6 +42,7 @@ const ICONS = {
   mic: 'M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z',
   stop: 'M6 6h12v12H6z',
   camera: 'M12 15.2A3.2 3.2 0 1 0 12 8.8a3.2 3.2 0 0 0 0 6.4zM9 2 7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z',
+  album: 'M22 16V4c0-1.1-.9-2-2-2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2zm-11-4 2.03 2.71L16 11l4 5H8l3-4zM2 6v14c0 1.1.9 2 2 2h14v-2H4V6H2z',
   close: 'M19,6.41L17.59,5 12,10.59 6.41,5 5,6.41 10.59,12 5,17.59 6.41,19 12,13.41 17.59,19 19,17.59 13.41,12z',
   upload: 'M9,16h6v-6h4l-7,-7 -7,7h4zM5,18h14v2H5z',
   sparkle: 'M19,9l1.25,-2.75L23,5l-2.75,-1.25L19,1l-1.25,2.75L15,5l2.75,1.25L19,9zM11.5,9.5L9,4L6.5,9.5L1,12l5.5,2.5L9,20l2.5,-5.5L17,12L11.5,9.5zM19,15l-1.25,2.75L15,19l2.75,1.25L19,23l1.25,-2.75L23,19l-2.75,-1.25L19,15z',
@@ -434,43 +436,53 @@ async function viewRecipeForm(id) {
 
   /* ---- 写真（手書きメモなど）から読み取る ---- */
 
+  async function readMemo(loadImages) {
+    photoReadButton.disabled = true;
+    aiStatus.textContent = '写真を読み込んでいます…';
+    try {
+      const images = await loadImages();
+      aiStatus.textContent = 'AIが写真を読み取っています…';
+      const result = await structureRecipeFromImages(images, { onRetry });
+      if (!result.title && !result.ingredients.length && !result.steps.length) {
+        aiStatus.textContent = 'レシピを読み取れませんでした。文字全体が明るくはっきり写るように撮り直してみてください。';
+        return;
+      }
+      applyResult(result);
+      if (isNew) draft.sourceType = 'photo';
+      aiStatus.textContent = '読み取りました。内容を確認して保存してください。';
+    } catch (error) {
+      showAiError(error);
+    } finally {
+      photoReadButton.disabled = false;
+    }
+  }
+
+  // カメラ画面の左下のボタンから、アルバムの写真を選ぶとき用。複数ページのメモはまとめて選べる。
   const memoImageInput = h('input', {
     type: 'file',
     accept: 'image/*',
     multiple: true,
     hidden: true,
-    onChange: async (e) => {
+    onChange: (e) => {
       const files = [...e.target.files];
       e.target.value = '';
       if (!files.length) return;
-      photoReadButton.disabled = true;
-      aiStatus.textContent = '写真を読み込んでいます…';
-      try {
-        // 元の写真は数MBあり送信が重いため、手書き文字が潰れない程度に縮小してから送る。
-        const images = await Promise.all(files.map(async (file) => {
-          const dataUrl = await readAndCompressImage(file, 1600, 0.85);
-          return { mimeType: 'image/jpeg', data: dataUrl.split(',')[1] };
-        }));
-        aiStatus.textContent = 'AIが写真を読み取っています…';
-        const result = await structureRecipeFromImages(images, { onRetry });
-        if (!result.title && !result.ingredients.length && !result.steps.length) {
-          aiStatus.textContent = 'レシピを読み取れませんでした。文字全体が明るくはっきり写るように撮り直してみてください。';
-          return;
-        }
-        applyResult(result);
-        if (isNew) draft.sourceType = 'photo';
-        aiStatus.textContent = '読み取りました。内容を確認して保存してください。';
-      } catch (error) {
-        showAiError(error);
-      } finally {
-        photoReadButton.disabled = false;
-      }
+      // 元の写真は数MBあり送信が重いため、手書き文字が潰れない程度に縮小してから送る。
+      readMemo(() => Promise.all(files.map(async (file) => {
+        const dataUrl = await readAndCompressImage(file, 1600, 0.85);
+        return { mimeType: 'image/jpeg', data: dataUrl.split(',')[1] };
+      })));
     },
   });
 
   const photoReadButton = h('button', {
     class: 'tonal',
-    onClick: () => memoImageInput.click(),
+    onClick: () => openCamera({
+      h,
+      icon,
+      onCapture: (image) => readMemo(async () => [image]),
+      onPickFromAlbum: () => memoImageInput.click(),
+    }),
   }, [icon('camera', 20), h('span', { text: '写真から読み取る' })]);
 
   const titleInput = h('input', {
@@ -1022,6 +1034,7 @@ function viewLogin() {
 
 async function render() {
   stopRecording();
+  closeCamera();
 
   if (!currentUser()) {
     app.replaceChildren(viewLogin());
