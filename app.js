@@ -61,11 +61,11 @@ function icon(name, size = 24) {
   return svg;
 }
 
-function toast(message) {
+function toast(message, duration = 2000) {
   document.querySelector('.toast')?.remove();
   const node = h('div', { class: 'toast', text: message });
   document.body.append(node);
-  setTimeout(() => node.remove(), 2000);
+  setTimeout(() => node.remove(), duration);
 }
 
 function go(path) {
@@ -370,6 +370,20 @@ async function viewRecipeForm(id) {
     if (result.steps.length) { draft.steps = result.steps; steps.refresh(); }
   }
 
+  /* 読み取り・整形が終わったことが分かるよう、通知・振動し、中身が入った欄を光らせてそこまで移動する。
+     （処理中に画面を見ていなかったり、結果が画面の下の方に入ったりして気づきにくいため） */
+  function notifyDone(toastText, statusText, targets) {
+    aiStatus.textContent = statusText;
+    toast(`✓ ${toastText}`, 3500);
+    navigator.vibrate?.(60);
+    for (const target of targets) {
+      target.classList.remove('flash');
+      void target.offsetWidth; // アニメーションを最初からやり直すため
+      target.classList.add('flash');
+    }
+    targets[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
   /* ---- 音声入力（録音してGeminiで文字起こし） ---- */
 
   function setMicState(state, elapsedMs = 0) {
@@ -404,7 +418,7 @@ async function viewRecipeForm(id) {
       }
       const current = transcriptArea.value.trimEnd();
       transcriptArea.value = current ? `${current}\n${text}` : text;
-      aiStatus.textContent = '文字起こししました。内容を確認して「AIで整形する」を押してください。';
+      notifyDone('文字起こしが完了しました', '文字起こししました。内容を確認して「AIで整形する」を押してください。', [transcriptArea]);
     } catch (error) {
       showAiError(error);
     } finally {
@@ -449,7 +463,7 @@ async function viewRecipeForm(id) {
       }
       applyResult(result);
       if (isNew) draft.sourceType = 'photo';
-      aiStatus.textContent = '読み取りました。内容を確認して保存してください。';
+      notifyDone('写真の読み取りが完了しました', '読み取りました。内容を確認して保存してください。', [basicsCard, ingredientsCard, stepsCard]);
     } catch (error) {
       showAiError(error);
     } finally {
@@ -525,7 +539,7 @@ async function viewRecipeForm(id) {
       try {
         applyResult(await structureRecipe(transcript, { onRetry }));
         if (isNew) draft.sourceType = 'voice';
-        aiStatus.textContent = '整形しました。内容を確認して保存してください。';
+        notifyDone('AIの整形が完了しました', '整形しました。内容を確認して保存してください。', [basicsCard, ingredientsCard, stepsCard]);
       } catch (error) {
         showAiError(error);
       } finally {
@@ -534,8 +548,32 @@ async function viewRecipeForm(id) {
     },
   }, [icon('sparkle', 20), h('span', { text: 'AIで整形する' })]);
 
+  // 手入力のレシピにも製作者を付けられるようにする。既に使われている名前は候補から選べる。
+  const creators = [...new Set((await listRecipes()).map((r) => r.creator).filter(Boolean))];
+  const creatorInput = h('input', {
+    type: 'text',
+    value: draft.creator || '',
+    placeholder: '例：Akemi、長谷川あかり（空欄でもOK）',
+    list: 'creator-options',
+    autocomplete: 'off',
+    onInput: (e) => { draft.creator = e.target.value; },
+  });
+
+  const basicsCard = h('div', { class: 'card' }, [
+    h('div', { class: 'field' }, [h('label', { class: 'field__label', text: '料理名' }), titleInput]),
+    h('div', { class: 'field' }, [h('label', { class: 'field__label', text: '分量・人数' }), servingsInput]),
+    h('div', { class: 'field', style: { marginBottom: '0' } }, [
+      h('label', { class: 'field__label', text: '製作者' }),
+      creatorInput,
+      h('datalist', { id: 'creator-options' }, creators.map((name) => h('option', { value: name }))),
+    ]),
+  ]);
+  const ingredientsCard = h('div', { class: 'card' }, [ingredients.node]);
+  const stepsCard = h('div', { class: 'card' }, [steps.node]);
+
   const save = async () => {
     if (!draft.title.trim()) { toast('タイトルを入力してください'); return; }
+    draft.creator = (draft.creator || '').trim();
     const userName = getSetting(KEYS.userName);
     draft.updatedBy = userName || draft.updatedBy;
     if (isNew) draft.createdBy = userName || draft.createdBy;
@@ -557,13 +595,10 @@ async function viewRecipeForm(id) {
         memoImageInput,
         aiStatus,
       ]),
-      h('div', { class: 'card' }, [
-        h('div', { class: 'field' }, [h('label', { class: 'field__label', text: '料理名' }), titleInput]),
-        h('div', { class: 'field', style: { marginBottom: '0' } }, [h('label', { class: 'field__label', text: '分量・人数' }), servingsInput]),
-      ]),
+      basicsCard,
       photoField(draft),
-      h('div', { class: 'card' }, [ingredients.node]),
-      h('div', { class: 'card' }, [steps.node]),
+      ingredientsCard,
+      stepsCard,
       h('div', { class: 'card' }, [
         h('div', { class: 'field' }, [h('label', { class: 'field__label', text: 'タグ' }), tagsInput]),
         h('div', { class: 'field', style: { marginBottom: '0' } }, [h('label', { class: 'field__label', text: 'メモ' }), memoInput]),

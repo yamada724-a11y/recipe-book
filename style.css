@@ -841,6 +841,22 @@ html[data-theme="dark"] .login__notice {
   background: none;
 }
 
+/* --- 読み取り・整形の完了時に、中身が入った欄を光らせる --- */
+
+@keyframes done-flash {
+  0%, 35% {
+    box-shadow: 0 0 0 2px var(--g-green);
+    background-color: rgba(52, 168, 83, .16);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+
+.flash {
+  animation: done-flash 2.4s ease-out;
+}
+
 /* --- Camera（手書きメモの撮影） --- */
 
 .camera {
