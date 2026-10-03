@@ -1,5 +1,5 @@
 /* アプリを更新したら、この番号を1つ上げること。 */
-const CACHE_VERSION = 'v9';
+const CACHE_VERSION = 'v10';
 
 const SHELL_CACHE = `shell-${CACHE_VERSION}`;
 

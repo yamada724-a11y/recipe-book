@@ -722,6 +722,29 @@ html[data-theme="dark"] .tonal--live {
   color: var(--on-primary-container);
 }
 
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2, 8px);
+  margin-top: 8px;
+}
+
+.chip {
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--outline);
+  border-radius: 16px;
+  background: none;
+  font-size: var(--t2);
+  color: var(--text-2);
+  transition: background var(--duration) ease, color var(--duration) ease;
+}
+
+.chip[aria-pressed="true"] {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+}
+
 /* --- Login --- */
 
 .login {

@@ -549,16 +549,31 @@ async function viewRecipeForm(id) {
     },
   }, [icon('sparkle', 20), h('span', { text: 'AIで整形する' })]);
 
-  // 手入力のレシピにも製作者を付けられるようにする。既に使われている名前は候補から選べる。
+  // 手入力のレシピにも製作者を付けられるようにする。既に使われている名前はボタンで選べる。
+  // datalistはAndroidで日本語入力を妨げることがあるため使わない。
   const creators = [...new Set((await listRecipes()).map((r) => r.creator).filter(Boolean))];
+  const creatorChips = creators.map((name) => h('button', {
+    type: 'button',
+    class: 'chip',
+    text: name,
+    onClick: () => {
+      draft.creator = name;
+      creatorInput.value = name;
+      refreshCreatorChips();
+    },
+  }));
+  function refreshCreatorChips() {
+    const current = (draft.creator || '').trim();
+    creatorChips.forEach((chip) => chip.setAttribute('aria-pressed', String(chip.textContent === current)));
+  }
   const creatorInput = h('input', {
     type: 'text',
     value: draft.creator || '',
-    placeholder: '例：Akemi、長谷川あかり（空欄でもOK）',
-    list: 'creator-options',
+    placeholder: '新しい名前もここに入力できます（空欄でもOK）',
     autocomplete: 'off',
-    onInput: (e) => { draft.creator = e.target.value; },
+    onInput: (e) => { draft.creator = e.target.value; refreshCreatorChips(); },
   });
+  refreshCreatorChips();
 
   const basicsCard = h('div', { class: 'card' }, [
     h('div', { class: 'field' }, [h('label', { class: 'field__label', text: '料理名' }), titleInput]),
@@ -566,7 +581,7 @@ async function viewRecipeForm(id) {
     h('div', { class: 'field', style: { marginBottom: '0' } }, [
       h('label', { class: 'field__label', text: '製作者' }),
       creatorInput,
-      h('datalist', { id: 'creator-options' }, creators.map((name) => h('option', { value: name }))),
+      creators.length > 0 && h('div', { class: 'chips' }, creatorChips),
     ]),
   ]);
   const ingredientsCard = h('div', { class: 'card' }, [ingredients.node]);
