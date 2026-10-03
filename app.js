@@ -1,6 +1,7 @@
 import {
   createRecipe, listRecipes, getRecipe, saveRecipe, deleteRecipe, onChange, normalizeSearchTerm,
   signIn, signOutUser, onAuthChange, currentUser, startSync, stopSync,
+  loadCloudUserName, saveCloudUserName,
 } from './firebase.js';
 import {
   KEYS, getSetting, setSetting, structureRecipe, structureRecipes, structureRecipeFromImages, transcribeAudio, MissingKeyError,
@@ -968,6 +969,7 @@ function viewSettings() {
         text: '保存',
         onClick: () => {
           setSetting(KEYS.userName, nameInput.value.trim());
+          saveCloudUserName(nameInput.value.trim());
           setSetting(KEYS.geminiApiKey, apiKeyInput.value.trim());
           toast('保存しました');
           go('/');
@@ -1095,9 +1097,26 @@ async function render() {
 applyTheme();
 window.addEventListener('hashchange', render);
 onChange(render);
+async function syncUserName() {
+  const local = getSetting(KEYS.userName);
+  if (local) {
+    saveCloudUserName(local);
+    return;
+  }
+  const cloud = await loadCloudUserName();
+  if (cloud) {
+    setSetting(KEYS.userName, cloud);
+    toast(`名前「${cloud}」を復元しました`);
+  }
+}
+
 onAuthChange((user) => {
-  if (user) startSync();
-  else stopSync();
+  if (user) {
+    startSync();
+    syncUserName();
+  } else {
+    stopSync();
+  }
   render();
 });
 

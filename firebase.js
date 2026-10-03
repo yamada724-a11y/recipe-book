@@ -6,6 +6,7 @@ import {
   collection,
   doc,
   setDoc,
+  getDoc,
   deleteDoc,
   onSnapshot,
   query,
@@ -152,4 +153,33 @@ export async function saveRecipe(recipe) {
 
 export async function deleteRecipe(id) {
   await deleteDoc(doc(recipesRef, id));
+}
+
+/* ---------- ユーザー名のクラウド保存（端末のデータ削除から復元するため） ---------- */
+
+function userSettingsDoc() {
+  const user = auth.currentUser;
+  return user ? doc(db, 'userSettings', user.uid) : null;
+}
+
+export async function loadCloudUserName() {
+  const ref = userSettingsDoc();
+  if (!ref) return '';
+  try {
+    const snap = await getDoc(ref);
+    return snap.exists() ? snap.data().name || '' : '';
+  } catch (error) {
+    console.warn('ユーザー名の読み込みに失敗しました', error);
+    return '';
+  }
+}
+
+export async function saveCloudUserName(name) {
+  const ref = userSettingsDoc();
+  if (!ref) return;
+  try {
+    await setDoc(ref, { name, updatedAt: new Date().toISOString() });
+  } catch (error) {
+    console.warn('ユーザー名の保存に失敗しました', error);
+  }
 }
